@@ -4,10 +4,13 @@ namespace App\Models;
 
 use App\Models\Category;
 use App\Models\BorrowDetail;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 class Book extends Model
 {
+    use HasFactory;
+    
     protected $fillable = [
         'category_id',
         'title',
