@@ -12,7 +12,13 @@ class Borrow extends Model
     protected $fillable = [
         'user_id',
         'borrow_date',
+        'original_due_date',
+        'current_due_date',
+        'extended_count',
+        'pickup_at',
+        'late_days',
         'due_date',
+        'fine_amount',
         'return_date',
         'status',
         'approved_by',
@@ -37,4 +43,6 @@ class Borrow extends Model
     {
         return $this->hasMany(BorrowExtension::class);
     }
+
+    
 }

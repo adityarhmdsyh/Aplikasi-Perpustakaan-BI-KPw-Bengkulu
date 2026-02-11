@@ -19,6 +19,13 @@ class UserSeeder extends Seeder
             'role' => 'admin',
             'status' => 'active',
         ]);
+        User::create([
+            'name' => 'User',
+            'email' => 'user@perpusbi.test',
+            'password' => Hash::make('password'),
+            'role' => 'user',
+            'status' => 'active',
+        ]);
 
         // Users
         User::factory()->count(10)->create([

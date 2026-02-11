@@ -12,33 +12,43 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('borrows', function (Blueprint $table) {
-    $table->id();
+            $table->id();
 
-    $table->foreignId('user_id')
-          ->constrained()
-          ->cascadeOnDelete();
+            $table->foreignId('user_id')
+            ->constrained()
+            ->cascadeOnDelete();
 
-    $table->date('borrow_date');
-    $table->date('due_date');
-    $table->date('return_date')->nullable();
+            $table->date('borrow_date');
 
-    $table->enum('status', [
-        'pending',
-        'approved',
-        'rejected',
-        'picked_up',
-        'returned',
-        'extended'
-    ])->default('pending');
+            $table->date('original_due_date');
 
-    $table->foreignId('approved_by')
-          ->nullable()
-          ->references('id')
-          ->on('users')
-          ->nullOnDelete();
+            $table->date('current_due_date')->nullable();
 
-    $table->timestamps();
+            $table->integer('extended_count')->default(0);
+
+            $table->dateTime('pickup_at')->nullable();
+            $table->dateTime('return_date')->nullable();
+
+            $table->enum('status', [
+                'pending',
+                'approved',
+                'rejected',
+                'picked_up',
+                'returned'
+                ])->default('pending');
+
+            $table->foreignId('approved_by')
+                ->nullable()
+                ->references('id')
+                ->on('users')
+                ->nullOnDelete();
+
+            $table->integer('late_days')->default(0);
+            $table->decimal('fine_amount', 10, 2)->default(0);
+
+            $table->timestamps();
 });
+
 
 
     }
