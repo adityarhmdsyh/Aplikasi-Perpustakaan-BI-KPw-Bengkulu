@@ -2,13 +2,18 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Http\Controllers\Controller;
 use App\Models\Book;
 use App\Models\Borrow;
+
 use App\Models\BorrowDetail;
-use Illuminate\Http\Request;
 use App\Models\BorrowExtension;
+use Carbon\Carbon;
+use Illuminate\Foundation\Exceptions\Renderer\Exception;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use App\Http\Controllers\Controller;
+
+
 
 class BorrowController extends Controller
 {
@@ -39,7 +44,12 @@ public function index(Request $request)
     ]);
 }
 
-        public function store(Request $request)
+use Illuminate\Support\Facades\DB;
+use App\Models\Borrow;
+use App\Models\BorrowDetail;
+use App\Models\Book;
+
+public function store(Request $request)
 {
     $request->validate([
         'books' => 'required|array|min:1',
@@ -48,6 +58,57 @@ public function index(Request $request)
     ]);
 
     $user = auth()->user();
+
+    // 1️⃣ Cek status user
+    if ($user->status !== 'active') {
+        return response()->json([
+            'status' => false,
+            'message' => 'Akun belum aktif atau diblokir'
+        ], 403);
+    }
+
+    // 2️⃣ Cek apakah masih ada borrow aktif
+    $activeBorrow = Borrow::where('user_id', $user->id)
+        ->whereIn('status', ['pending', 'approved', 'borrowed'])
+        ->exists();
+
+    if ($activeBorrow) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Masih ada peminjaman aktif'
+        ], 400);
+    }
+
+    // 3️⃣ Maksimal 3 buku
+    if (count($request->books) > 2) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Maksimal 3 buku dalam satu peminjaman'
+        ], 400);
+    }
+
+    // 4️⃣ Cek duplikasi book
+    $bookIds = collect($request->books)->pluck('book_id');
+
+    if ($bookIds->count() !== $bookIds->unique()->count()) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Tidak boleh ada buku yang sama dalam satu request'
+        ], 400);
+    }
+
+    // 5️⃣ Cek stok cukup
+    foreach ($request->books as $item) {
+
+        $book = Book::find($item['book_id']);
+
+        if ($book->stock < $item['quantity']) {
+            return response()->json([
+                'status' => false,
+                'message' => "Stok buku '{$book->title}' tidak mencukupi"
+            ], 400);
+        }
+    }
 
     DB::beginTransaction();
 
@@ -83,10 +144,12 @@ public function index(Request $request)
 
         return response()->json([
             'status' => false,
-            'message' => $e->getMessage()
+            'message' => 'Terjadi kesalahan server',
+            'error' => $e->getMessage()
         ], 500);
     }
 }
+
 
 public function approve($id)
 {
@@ -234,7 +297,7 @@ public function requestExtend(Request $request, $id)
         'requested_due_date' => 'required|date|after:today'
     ]);
 
-    $borrow = Borrow::find($id);
+    $borrow = Borrow::with('extensions')->find($id);
 
     if (!$borrow) {
         return response()->json([
@@ -243,6 +306,7 @@ public function requestExtend(Request $request, $id)
         ], 404);
     }
 
+    // Hanya pemilik yang bisa request
     if ($borrow->user_id !== auth()->id()) {
         return response()->json([
             'status' => false,
@@ -250,6 +314,7 @@ public function requestExtend(Request $request, $id)
         ], 403);
     }
 
+    // Harus sudah diambil
     if ($borrow->status !== 'picked_up') {
         return response()->json([
             'status' => false,
@@ -257,6 +322,31 @@ public function requestExtend(Request $request, $id)
         ], 400);
     }
 
+    // Hitung extension yang sudah approved
+    $approvedCount = $borrow->extensions
+        ->where('status', 'approved')
+        ->count();
+
+    if ($approvedCount >= 2) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Maksimal perpanjangan sudah 2 kali'
+        ], 400);
+    }
+
+    // Cek apakah masih ada pending
+    $hasPending = $borrow->extensions
+        ->where('status', 'pending')
+        ->count();
+
+    if ($hasPending > 0) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Masih ada permintaan perpanjangan yang belum diproses'
+        ], 400);
+    }
+
+    // Ambil due date aktif
     $activeDueDate = $borrow->current_due_date ?? $borrow->original_due_date;
 
     if ($request->requested_due_date <= $activeDueDate) {
@@ -266,6 +356,7 @@ public function requestExtend(Request $request, $id)
         ], 400);
     }
 
+    // Simpan request
     BorrowExtension::create([
         'borrow_id' => $borrow->id,
         'requested_due_date' => $request->requested_due_date,
@@ -278,70 +369,170 @@ public function requestExtend(Request $request, $id)
     ]);
 }
 
+
 public function approveExtend($id)
 {
-    $extension = BorrowExtension::with('borrow')->find($id);
+    return DB::transaction(function () use ($id) {
 
-    if (!$extension) {
+        $extension = BorrowExtension::with('borrow.extensions')->find($id);
+
+        if (!$extension) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Data extension tidak ditemukan'
+            ], 404);
+        }
+
+        if ($extension->status !== 'pending') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Extension sudah diproses'
+            ], 400);
+        }
+
+        $borrow = $extension->borrow;
+
+        if (!$borrow) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Data peminjaman tidak ditemukan'
+            ], 404);
+        }
+
+        // Pastikan belum returned
+        if ($borrow->status === 'returned') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Buku sudah dikembalikan'
+            ], 400);
+        }
+
+        // Update borrow
+        $borrow->update([
+            'current_due_date' => $extension->requested_due_date,
+            'extended_count' => $borrow->extended_count + 1
+        ]);
+
+        // Update extension
+        $extension->update([
+            'status' => 'approved',
+            'approved_due_date' => $extension->requested_due_date,
+            'approved_by' => auth()->id()
+        ]);
+
         return response()->json([
-            'status' => false,
-            'message' => 'Data extension tidak ditemukan'
-        ], 404);
-    }
-
-    if ($extension->status !== 'pending') {
-        return response()->json([
-            'status' => false,
-            'message' => 'Extension sudah diproses'
-        ], 400);
-    }
-
-    $borrow = $extension->borrow;
-
-    $borrow->update([
-        'current_due_date' => $extension->requested_due_date,
-        'extended_count' => $borrow->extended_count + 1
-    ]);
-
-    $extension->update([
-        'status' => 'approved',
-        'approved_due_date' => $extension->requested_due_date,
-        'approved_by' => auth()->id()
-    ]);
-
-    return response()->json([
-        'status' => true,
-        'message' => 'Perpanjangan disetujui'
-    ]);
+            'status' => true,
+            'message' => 'Perpanjangan disetujui',
+            'data' => [
+                'new_due_date' => $extension->requested_due_date,
+                'total_extend' => $borrow->extended_count + 1
+            ]
+        ]);
+    });
 }
+
 
 public function rejectExtend($id)
 {
-    $extension = BorrowExtension::find($id);
+    return DB::transaction(function () use ($id) {
 
-    if (!$extension) {
+        $extension = BorrowExtension::with('borrow')->find($id);
+
+        if (!$extension) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Data extension tidak ditemukan'
+            ], 404);
+        }
+
+        if ($extension->status !== 'pending') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Extension sudah diproses'
+            ], 400);
+        }
+
+        $borrow = $extension->borrow;
+
+        if (!$borrow) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Data peminjaman tidak ditemukan'
+            ], 404);
+        }
+
+        // Optional: jangan proses kalau sudah returned
+        if ($borrow->status === 'returned') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Buku sudah dikembalikan'
+            ], 400);
+        }
+
+        $extension->update([
+            'status' => 'rejected',
+            'approved_by' => auth()->id()
+        ]);
+
         return response()->json([
-            'status' => false,
-            'message' => 'Data extension tidak ditemukan'
-        ], 404);
-    }
+            'status' => true,
+            'message' => 'Perpanjangan ditolak'
+        ]);
+    });
+}
 
-    if ($extension->status !== 'pending') {
+public function returnBook($id)
+{
+    return DB::transaction(function () use ($id) {
+
+        $borrow = Borrow::find($id);
+
+        if (!$borrow) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Data peminjaman tidak ditemukan'
+            ], 404);
+        }
+
+        if ($borrow->status !== 'picked_up') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Buku belum dipinjam atau sudah dikembalikan'
+            ], 400);
+        }
+
+        $now = Carbon::now();
+
+        // Ambil due date aktif
+        $activeDueDate = $borrow->current_due_date ?? $borrow->original_due_date;
+        $dueDate = Carbon::parse($activeDueDate);
+
+        $lateDays = 0;
+        $finePerDay = 2000;
+        $fineAmount = 0;
+
+        if ($now->gt($dueDate)) {
+            $lateDays = $dueDate->diffInDays($now);
+            $fineAmount = $lateDays * $finePerDay;
+        }
+
+        $borrow->update([
+            'return_date' => $now,
+            'late_days' => $lateDays,
+            'fine_amount' => $fineAmount,
+            'status' => 'returned'
+        ]);
+
         return response()->json([
-            'status' => false,
-            'message' => 'Extension sudah diproses'
-        ], 400);
-    }
-
-    $extension->update([
-        'status' => 'rejected',
-        'approved_by' => auth()->id()
-    ]);
-
-    return response()->json([
-        'status' => true,
-        'message' => 'Perpanjangan ditolak'
-    ]);
+            'status' => true,
+            'message' => 'Buku berhasil dikembalikan',
+            'data' => [
+                'return_date' => $now,
+                'late_days' => $lateDays,
+                'fine_amount' => $fineAmount
+            ]
+        ]);
+    });
 }
 
 
